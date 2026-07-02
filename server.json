@@ -1,6 +1,6 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.MetaLift-AI/mcp",
+  "name": "io.github.metalift-ai/metalift",
   "description": "Metalift MCP server for AI agents",
   "repository": {
     "url": "https://github.com/MetaLift-AI/metalift-mcp",
