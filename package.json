@@ -1,5 +1,6 @@
 {
   "name": "@metalift/mcp",
+  "mcpName": "io.github.metalift-ai/metalift",
   "version": "1.0.0",
   "description": "Metalift MCP server for AI agents",
   "license": "SEE LICENSE IN LICENSE",
@@ -37,7 +38,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/Endacoder/scraper-mcp"
+    "url": "https://github.com/MetaLift-AI/metalift-mcp"
   },
   "publishConfig": {
     "access": "public"
