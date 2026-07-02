@@ -32,22 +32,6 @@ Add to your MCP client config:
 }
 ```
 
-For local development against a self-hosted API:
-
-```json
-{
-  "mcpServers": {
-    "metalift": {
-      "command": "node",
-      "args": ["/absolute/path/to/scraper-mcp/packages/mcp/dist/index.js"],
-      "env": {
-        "METALIFT_API_URL": "http://localhost:8080"
-      }
-    }
-  }
-}
-```
-
 ## Environment variables
 
 | Variable | Description |
@@ -68,13 +52,6 @@ For local development against a self-hosted API:
 | `metalift_warm_session` | Warm WAF/retail cookies |
 | `metalift_list_sessions` | List stored domain sessions |
 
-## Local development
-
-```bash
-npm install
-npm run build
-npm run start
-```
 
 Verify tarball contents before publishing:
 
