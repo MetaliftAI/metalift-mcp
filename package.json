@@ -1,6 +1,6 @@
 {
   "name": "@metalift/mcp",
-  "mcpName": "io.github.metalift-ai/metalift",
+  "mcpName": "io.github.MetaliftAI/metalift",
   "version": "1.0.0",
   "description": "Metalift MCP server for AI agents",
   "license": "SEE LICENSE IN LICENSE",
@@ -38,7 +38,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/MetaLift-AI/metalift-mcp"
+    "url": "https://github.com/MetaliftAI/metalift-mcp"
   },
   "publishConfig": {
     "access": "public"
