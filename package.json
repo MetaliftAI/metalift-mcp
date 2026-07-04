@@ -1,7 +1,7 @@
 {
   "name": "@metalift/mcp",
-  "mcpName": "io.github.MetaliftAI/metalift",
-  "version": "1.0.0",
+  "mcpName": "io.github.MetaLift-AI/metalift",
+  "version": "1.0.10",
   "description": "Metalift MCP server for AI agents",
   "license": "SEE LICENSE IN LICENSE",
   "type": "module",
@@ -13,6 +13,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
+    "test": "npm run build && node --test dist/client.test.js dist/scrape-args.test.js dist/scrape-format.test.js dist/web-search.test.js",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
@@ -34,11 +35,12 @@
   },
   "files": [
     "dist",
+    "README.md",
     "LICENSE"
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/MetaliftAI/metalift-mcp"
+    "url": "https://github.com/MetaLift-AI/metalift-mcp"
   },
   "publishConfig": {
     "access": "public"

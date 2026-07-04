@@ -1,0 +1,119 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { FAST_SCRAPE_TIMEOUT_MS, normalizeScrapeArgs } from "./scrape-args.js";
+
+const BASE_URL = "https://example.com/docs";
+
+test("normalizeScrapeArgs applies fast defaults for plain markdown scrape", () => {
+  assert.deepEqual(normalizeScrapeArgs({ url: BASE_URL }), {
+    url: BASE_URL,
+    formats: ["markdown"],
+    strategy: "article",
+    render: "static",
+    response_detail: "compact",
+    timeout_ms: FAST_SCRAPE_TIMEOUT_MS,
+  });
+});
+
+test("normalizeScrapeArgs preserves explicit timeout_ms", () => {
+  assert.equal(
+    normalizeScrapeArgs({ url: BASE_URL, timeout_ms: 30_000 }).timeout_ms,
+    30_000
+  );
+});
+
+test("normalizeScrapeArgs preserves explicit strategy auto", () => {
+  const args = normalizeScrapeArgs({ url: BASE_URL, strategy: "auto" });
+  assert.equal(args.strategy, "auto");
+  assert.equal(args.render, undefined);
+  assert.equal(args.proxy, undefined);
+});
+
+test("normalizeScrapeArgs preserves explicit specialized strategy", () => {
+  const args = normalizeScrapeArgs({ url: BASE_URL, strategy: "cloudflare" });
+  assert.equal(args.strategy, "cloudflare");
+  assert.equal(args.render, undefined);
+});
+
+test("normalizeScrapeArgs preserves explicit render auto", () => {
+  const args = normalizeScrapeArgs({ url: BASE_URL, render: "auto" });
+  assert.equal(args.render, "auto");
+  assert.equal(args.strategy, undefined);
+});
+
+test("normalizeScrapeArgs preserves explicit render dynamic", () => {
+  const args = normalizeScrapeArgs({ url: BASE_URL, render: "dynamic" });
+  assert.equal(args.render, "dynamic");
+});
+
+test("normalizeScrapeArgs preserves explicit proxy auto", () => {
+  const args = normalizeScrapeArgs({ url: BASE_URL, proxy: "auto" });
+  assert.equal(args.proxy, "auto");
+});
+
+test("normalizeScrapeArgs preserves explicit premium proxy", () => {
+  const args = normalizeScrapeArgs({ url: BASE_URL, proxy: "residential" });
+  assert.equal(args.proxy, "residential");
+});
+
+test("normalizeScrapeArgs preserves screenshot requests", () => {
+  const args = normalizeScrapeArgs({ url: BASE_URL, screenshot: true });
+  assert.equal(args.screenshot, true);
+  assert.equal(args.strategy, undefined);
+});
+
+test("normalizeScrapeArgs preserves wait_for selector", () => {
+  const args = normalizeScrapeArgs({ url: BASE_URL, wait_for: "main" });
+  assert.equal(args.wait_for, "main");
+});
+
+test("normalizeScrapeArgs preserves cookies", () => {
+  const args = normalizeScrapeArgs({ url: BASE_URL, cookies: { sid: "abc" } });
+  assert.deepEqual(args.cookies, { sid: "abc" });
+});
+
+test("normalizeScrapeArgs preserves cookie_header", () => {
+  const args = normalizeScrapeArgs({ url: BASE_URL, cookie_header: "sid=abc" });
+  assert.equal(args.cookie_header, "sid=abc");
+});
+
+test("normalizeScrapeArgs auto-selects download for full-page HTML", () => {
+  const args = normalizeScrapeArgs({
+    url: BASE_URL,
+    formats: ["html"],
+    only_main_content: false,
+  });
+  assert.equal(args.strategy, "download");
+  assert.equal(args.render, "static");
+  assert.equal(args.proxy, "direct");
+  assert.equal(args.timeout_ms, FAST_SCRAPE_TIMEOUT_MS);
+});
+
+test("normalizeScrapeArgs preserves explicit cloudflare for full-page HTML", () => {
+  const args = normalizeScrapeArgs({
+    url: BASE_URL,
+    formats: ["html"],
+    only_main_content: false,
+    strategy: "cloudflare",
+    render: "dynamic",
+  });
+  assert.equal(args.strategy, "cloudflare");
+  assert.equal(args.render, "dynamic");
+});
+
+test("normalizeScrapeArgs preserves non-markdown formats", () => {
+  const args = normalizeScrapeArgs({ url: BASE_URL, formats: ["html"] });
+  assert.deepEqual(args.formats, ["html"]);
+  assert.equal(args.strategy, undefined);
+});
+
+test("normalizeScrapeArgs preserves multi-format requests", () => {
+  const args = normalizeScrapeArgs({ url: BASE_URL, formats: ["markdown", "html"] });
+  assert.deepEqual(args.formats, ["markdown", "html"]);
+});
+
+test("normalizeScrapeArgs treats explicit markdown-only formats as fast path", () => {
+  const args = normalizeScrapeArgs({ url: BASE_URL, formats: ["markdown"] });
+  assert.equal(args.strategy, "article");
+  assert.equal(args.render, "static");
+});

@@ -1,28 +1,34 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.MetaliftAI/metalift",
-  "description": "Metalift MCP server for AI agents",
+  "name": "io.github.MetaLift-AI/metalift",
+  "description": "Metalift MCP server for AI agents — web search (2 credits, top 10 SERP) and decoupled scrape/crawl tools",
   "repository": {
-    "url": "https://github.com/MetaliftAI/metalift-mcp",
-    "source": "github",
-    "subfolder": "packages/mcp"
+    "url": "https://github.com/MetaLift-AI/metalift-mcp",
+    "source": "github"
   },
-  "version": "1.0.0",
+  "version": "1.0.8",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@metalift/mcp",
-      "version": "1.0.0",
+      "version": "1.0.8",
       "transport": {
         "type": "stdio"
       },
       "environmentVariables": [
         {
-          "description": "Your API key for the service",
+          "name": "METALIFT_API_URL",
+          "description": "Metalift scrape API base URL",
           "isRequired": true,
           "format": "string",
-          "isSecret": true,
-          "name": "YOUR_API_KEY"
+          "isSecret": false
+        },
+        {
+          "name": "METALIFT_API_KEY",
+          "description": "API key from https://app.metalift.ai/dashboard/keys",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": true
         }
       ]
     }
