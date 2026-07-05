@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  computeScrapeHttpTimeout,
   FAST_SCRAPE_TIMEOUT_MS,
+  describeAppliedDefaults,
   isEcommerceUrl,
   normalizeScrapeArgs,
 } from "./scrape-args.js";
@@ -43,12 +45,13 @@ test("normalizeScrapeArgs preserves explicit specialized strategy", () => {
 test("normalizeScrapeArgs preserves explicit render auto", () => {
   const args = normalizeScrapeArgs({ url: BASE_URL, render: "auto" });
   assert.equal(args.render, "auto");
-  assert.equal(args.strategy, undefined);
+  assert.equal(args.strategy, "auto");
 });
 
 test("normalizeScrapeArgs preserves explicit render dynamic", () => {
   const args = normalizeScrapeArgs({ url: BASE_URL, render: "dynamic" });
   assert.equal(args.render, "dynamic");
+  assert.equal(args.strategy, "auto");
 });
 
 test("normalizeScrapeArgs preserves explicit proxy auto", () => {
@@ -164,4 +167,35 @@ test("normalizeScrapeArgs respects explicit proxy/render on ecommerce url", () =
   assert.equal(args.strategy, "auto");
   assert.equal(args.proxy, "datacenter");
   assert.equal(args.render, "static");
+});
+
+test("computeScrapeHttpTimeout budgets explicit fallback chains", () => {
+  const timeoutMs = computeScrapeHttpTimeout({
+    url: BASE_URL,
+    strategy: "spa,cloudflare",
+    timeout_ms: 60_000,
+  });
+  assert.equal(timeoutMs, 150_000);
+});
+
+test("computeScrapeHttpTimeout floors browser paths at 120s", () => {
+  const timeoutMs = computeScrapeHttpTimeout({
+    url: BASE_URL,
+    strategy: "spa",
+  });
+  assert.equal(timeoutMs, 120_000);
+});
+
+test("describeAppliedDefaults explains ecommerce routing", () => {
+  const before = { url: AMAZON_URL };
+  const after = normalizeScrapeArgs(before);
+  const lines = describeAppliedDefaults(before, after);
+  assert.match(lines.join(" "), /e-commerce host/);
+});
+
+test("describeAppliedDefaults explains fast static path", () => {
+  const before = { url: BASE_URL };
+  const after = normalizeScrapeArgs(before);
+  const lines = describeAppliedDefaults(before, after);
+  assert.match(lines.join(" "), /plain URL/);
 });

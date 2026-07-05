@@ -1,4 +1,5 @@
 import type { MetaliftClient } from "./client.js";
+import { wrapResponse } from "./response-envelope.js";
 
 /** Minimal MCP tool-handler context needed for progress notifications. */
 export interface ToolHandlerExtra {
@@ -121,57 +122,54 @@ export function formatJobCreated(result: Record<string, unknown>): string {
   const estimate =
     typeof result.credits_estimated === "number" ? result.credits_estimated : undefined;
 
-  const lines = [
+  const body = [
     `${type} job created`,
     `Job ID: ${id}`,
     `Status: ${status}`,
-  ];
+    estimate !== undefined ? `Credits estimated: ${estimate}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
 
-  if (estimate !== undefined) {
-    lines.push(`Credits estimated: ${estimate}`);
-  }
-
-  lines.push("");
-  lines.push("Poll with metalift_job_status, or call metalift_crawl / metalift_batch_scrape with wait=true to block until done.");
-
-  return lines.join("\n");
+  return wrapResponse({
+    status: "partial",
+    credits: estimate ?? null,
+    body,
+    nextStep: "Poll with metalift_job_status, or call with wait=true to block until done.",
+  });
 }
 
 export function formatJobStatus(job: Record<string, unknown>): string {
   const status = typeof job.status === "string" ? job.status : "unknown";
-  const lines = [
-    `Job: ${job.id ?? "unknown"}`,
-    `Status: ${status}`,
-  ];
+  const bodyLines = [`Job: ${job.id ?? "unknown"}`, `Status: ${status}`];
 
   if (typeof job.type === "string") {
-    lines.push(`Type: ${job.type}`);
+    bodyLines.push(`Type: ${job.type}`);
   }
 
   const completed = job.completed;
   const total = job.total;
   if (typeof completed === "number" && typeof total === "number" && total > 0) {
     const pct = Math.round((completed / total) * 100);
-    lines.push(`Progress: ${completed}/${total} (${pct}%)`);
+    bodyLines.push(`Progress: ${completed}/${total} (${pct}%)`);
   } else if (typeof completed === "number" && completed > 0) {
-    lines.push(`Completed: ${completed}`);
+    bodyLines.push(`Completed: ${completed}`);
   }
 
   if (typeof job.credits_charged === "number") {
-    lines.push(`Credits charged: ${job.credits_charged}`);
+    bodyLines.push(`Credits charged: ${job.credits_charged}`);
   }
   if (typeof job.credits_estimated === "number") {
-    lines.push(`Credits estimated: ${job.credits_estimated}`);
+    bodyLines.push(`Credits estimated: ${job.credits_estimated}`);
   }
 
   if (status === "failed" && job.error) {
-    lines.push(`Error: ${String(job.error)}`);
+    bodyLines.push(`Error: ${String(job.error)}`);
   }
 
   const data = job.data;
   if (Array.isArray(data) && data.length > 0) {
-    lines.push(`Pages collected: ${data.length}`);
-    lines.push("");
+    bodyLines.push(`Pages collected: ${data.length}`, "");
     for (let i = 0; i < Math.min(data.length, 5); i++) {
       const page = data[i];
       if (typeof page !== "object" || page === null) continue;
@@ -184,17 +182,27 @@ export function formatJobStatus(job: Record<string, unknown>): string {
         (typeof metadata?.title === "string" && metadata.title) ||
         (typeof record.url === "string" && record.url) ||
         `Page ${i + 1}`;
-      lines.push(`  • ${title}`);
+      bodyLines.push(`  • ${title}`);
     }
     if (data.length > 5) {
-      lines.push(`  … and ${data.length - 5} more`);
+      bodyLines.push(`  … and ${data.length - 5} more`);
     }
   }
 
-  if (status === "pending" || status === "running") {
-    lines.push("");
-    lines.push("Still in progress — call again to refresh.");
-  }
+  const responseStatus =
+    status === "failed" ? "failed" : status === "completed" ? "success" : "partial";
 
-  return lines.join("\n");
+  const nextStep =
+    status === "pending" || status === "running"
+      ? "Still in progress — call again to refresh."
+      : status === "completed"
+        ? "Summarize collected pages in plain language."
+        : "Review error and retry with different scrape options.";
+
+  return wrapResponse({
+    status: responseStatus,
+    credits: typeof job.credits_charged === "number" ? job.credits_charged : null,
+    body: bodyLines.join("\n"),
+    nextStep,
+  });
 }

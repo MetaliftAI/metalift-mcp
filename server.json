@@ -6,12 +6,12 @@
     "url": "https://github.com/MetaLift-AI/metalift-mcp",
     "source": "github"
   },
-  "version": "1.0.11",
+  "version": "1.0.12",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@metalift/mcp",
-      "version": "1.0.11",
+      "version": "1.0.12",
       "transport": {
         "type": "stdio"
       },

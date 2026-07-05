@@ -2,10 +2,24 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import {
+  AGENT_GUIDE_EXTENDED,
+  CONFIG_DECISION_TREE,
+  SERVER_INSTRUCTIONS,
+} from "./agent-preamble.js";
 import { MetaliftClient } from "./client.js";
 import { runStartupCheck } from "./startup-check.js";
-import { formatBatchScrapeResponse, formatScrapeResponse } from "./scrape-format.js";
-import { normalizeScrapeArgs, FAST_SCRAPE_TIMEOUT_MS, type ScrapeArgs } from "./scrape-args.js";
+import {
+  formatBatchScrapeResponse,
+  formatScrapeResponse,
+  isScrapeFailure,
+} from "./scrape-format.js";
+import {
+  computeScrapeHttpTimeout,
+  describeAppliedDefaults,
+  normalizeScrapeArgs,
+  type ScrapeArgs,
+} from "./scrape-args.js";
 import { buildWebSearchRequest, formatWebSearchResponse, WEB_SEARCH_RESULT_LIMIT } from "./web-search.js";
 import {
   formatJobCreated,
@@ -14,43 +28,46 @@ import {
   waitForJob,
   type ToolHandlerExtra,
 } from "./progress.js";
+import { mcpTextResult } from "./response-envelope.js";
+import {
+  formatMapResponse,
+  formatSeedSessionResponse,
+  formatSessionsListResponse,
+  formatSitemapResponse,
+  formatStrategiesResponse,
+  formatWarmSessionResponse,
+} from "./tool-formatters.js";
 
 const COMPLIANCE_NOTICE =
   "You are solely responsible for complying with website terms, robots.txt, copyright, and data protection laws when using scraped content.";
 
-const SERVER_INSTRUCTIONS = `Metalift provides web search and web scraping as separate, independently billed tools.
-
-Web search (metalift_web_search):
-- Returns SERP metadata only: title, url, snippet, engine, score — not full page content.
-- Costs 2 credits per successful search (flat fee).
-- Always returns up to ${WEB_SEARCH_RESULT_LIMIT} results.
-- Do NOT auto-scrape all search results. Review snippets first, then call metalift_scrape only for URLs that need full content.
-
-Scraping (metalift_scrape, metalift_batch_scrape):
-- Fetches page content (markdown, html, text). Billed per URL (static=1, JS=5, premium=10+ credits).
-- response_detail controls how much is returned (default compact):
-  • compact — truncated markdown (~16k chars), minimal metadata, no links (best for LLM context)
-  • standard — full markdown/text, metadata with up to 25 links
-  • full — complete JSON payload including all links and html when requested
-- Use compact unless you need full page text or link extraction.
-
-Recommended agent workflow: metalift_web_search → answer from snippets when possible → metalift_scrape (compact) only when snippets are insufficient.
-
-Session cookies (WAF / login-gated pages):
-- Fingerprint mismatch exposes the scraper, not cookies themselves. Never replay cookies via static HTTP — that breaks TLS/JA3, Sec-CH-UA, and navigation context.
-- Correct pattern: browser session → Playwright (real Chromium TLS + headers) → sticky proxy → target. Metalift does this automatically when session credentials are present.
-- Preferred workflow:
-  1. User opens the site in their browser and passes cookies (or full Playwright storage_state JSON).
-  2. Call metalift_seed_session to store storage_state + user_agent for the domain (org-scoped, reused on later scrapes).
-  3. Call metalift_scrape without cookies — seeded session auto-applies via unified browser session.
-- One-shot: pass cookie_header or cookies on metalift_scrape — routes to Playwright + residential proxy (not static curl). Pair with headers.User-Agent from the same browser when provided.
-- Do not invent cookie values. Only use what the user explicitly provides.
-- metalift_warm_session (automated browser warmup, 15 credits) when manual seeding is not possible; often fails on strict WAFs.
-- metalift_list_sessions shows stored domains.
-
-For simple factual questions (versions, definitions, current events), prefer answering directly from search snippets. Do not scrape unless snippets are insufficient. Never paste raw scrape JSON to the user — summarize the answer in plain language.`;
-
 const client = new MetaliftClient();
+
+function normalizeBatchScrapeOptions(urls: string[], scrapeOptions: Omit<ScrapeArgs, "url">): Omit<ScrapeArgs, "url"> {
+  const normalized = urls.map((url) => normalizeScrapeArgs({ url, ...scrapeOptions }));
+  const first = normalized[0];
+  const needsAutoStrategy = scrapeOptions.strategy === undefined && normalized.some((args) => args.strategy === "auto");
+  const needsResidentialProxy = scrapeOptions.proxy === undefined && normalized.some((args) => args.proxy === "residential");
+  const needsAutoRender = scrapeOptions.render === undefined && normalized.some((args) => args.render === "auto");
+  const needsDynamicRender = scrapeOptions.render === undefined && normalized.some((args) => args.render === "dynamic");
+
+  return {
+    ...scrapeOptions,
+    formats: scrapeOptions.formats ?? first?.formats,
+    strategy: needsAutoStrategy ? "auto" : scrapeOptions.strategy ?? first?.strategy,
+    render: needsAutoRender ? "auto" : needsDynamicRender ? "dynamic" : scrapeOptions.render ?? first?.render,
+    proxy: needsResidentialProxy ? "residential" : scrapeOptions.proxy ?? first?.proxy,
+    timeout_ms: scrapeOptions.timeout_ms ?? first?.timeout_ms,
+    response_detail: scrapeOptions.response_detail ?? first?.response_detail,
+  };
+}
+
+function batchHttpTimeoutMs(urls: string[], scrapeOptions: Omit<ScrapeArgs, "url">): number {
+  const perUrlTimeout = Math.max(
+    ...urls.map((url) => computeScrapeHttpTimeout({ url, ...scrapeOptions })),
+  );
+  return Math.max(120_000, perUrlTimeout * urls.length);
+}
 
 const server = new McpServer(
   {
@@ -66,22 +83,37 @@ server.registerTool(
   "metalift_scrape",
   {
     title: "Scrape URL",
-    description: `Scrape a single URL into markdown, HTML, or text for LLM context. Separate from web search — use after metalift_web_search when full page content is needed. Default response_detail=compact (truncated markdown, no links). Use standard for full page text or full for complete JSON + all links. Default scrape path: fast direct static article extraction (strategy=article, render=static, proxy=direct, 10s timeout). Known e-commerce hosts (Amazon, Walmart, Target, eBay, Etsy, Wayfair, Nike, Best Buy, etc.) auto-route to the retail strategy (dynamic render + residential proxy, falls back to cloudflare) — just pass the URL, no need to set strategy for these. For full page HTML on static sites use strategy=download with formats=["html"] (1 credit, all tiers). strategy=raw and full-page HTML without download require Enterprise tier. For WAF, SPA, retail, or JS-heavy pages pass strategy=auto or a specific strategy (spa, cloudflare, retail). When the user provides browser session cookies (after a blocked scrape), pass cookie_header and matching User-Agent in headers. Response includes credits_charged based on actual usage (static=1, JS=5, premium=10+). ${COMPLIANCE_NOTICE}`,
+    description: `Scrape a single URL into markdown, HTML, or text. Default: fast static article path (1 credit, response_detail=compact). E-commerce hosts auto-route to retail/residential. Pass strategy=auto for WAF/SPA pages. Fetch metalift://agent-guide for session workflow. ${COMPLIANCE_NOTICE}`,
     inputSchema: {
-      url: z.string().url(),
+      url: z.string().url().describe("Page URL to scrape"),
       response_detail: z
         .enum(["compact", "standard", "full"])
         .optional()
         .describe(
           "Response depth: compact (default, ~16k chars, no links), standard (full markdown + capped links), full (complete JSON)."
         ),
-      formats: z.array(z.enum(["markdown", "html", "text", "json"])).optional(),
-      render: z.enum(["static", "dynamic", "auto"]).optional(),
-      only_main_content: z.boolean().optional(),
-      timeout_ms: z.number().optional(),
-      wait_for: z.string().optional(),
-      screenshot: z.boolean().optional(),
-      proxy: z.enum(["auto", "direct", "residential", "datacenter"]).optional(),
+      formats: z
+        .array(z.enum(["markdown", "html", "text", "json"]))
+        .optional()
+        .describe("Output formats; default markdown only"),
+      render: z
+        .enum(["static", "dynamic", "auto"])
+        .optional()
+        .describe("Render mode; default static for plain URLs"),
+      only_main_content: z
+        .boolean()
+        .optional()
+        .describe("Extract main article content only (default true)"),
+      timeout_ms: z
+        .number()
+        .optional()
+        .describe("Per-attempt timeout in milliseconds"),
+      wait_for: z.string().optional().describe("CSS selector to wait for before scraping"),
+      screenshot: z.boolean().optional().describe("Capture page screenshot (adds cost)"),
+      proxy: z
+        .enum(["auto", "direct", "residential", "datacenter"])
+        .optional()
+        .describe("Proxy tier; default direct for static pages"),
       strategy: z
         .string()
         .optional()
@@ -108,25 +140,23 @@ server.registerTool(
           'Extra request headers. Pass User-Agent from the user\'s browser when using cookie_header so the session fingerprint matches.'
         ),
     },
-    annotations: { readOnlyHint: true },
+    annotations: { readOnlyHint: true, openWorldHint: true },
   },
   async (args, extra) => {
-    const normalized = normalizeScrapeArgs(args as ScrapeArgs);
+    const rawArgs = args as ScrapeArgs;
+    const normalized = normalizeScrapeArgs(rawArgs);
+    const appliedDefaults = describeAppliedDefaults(rawArgs, normalized);
     const detail = normalized.response_detail ?? "compact";
-    const timeoutMs = (normalized.timeout_ms ?? FAST_SCRAPE_TIMEOUT_MS) + 30_000;
+    const timeoutMs = computeScrapeHttpTimeout(normalized);
     const result = await runWithProgress(
       extra as ToolHandlerExtra | undefined,
       `Scraping ${normalized.url}`,
       () => client.scrape({ ...normalized, response_detail: detail }, { timeoutMs })
     );
-    return {
-      content: [
-        {
-          type: "text",
-          text: formatScrapeResponse(result as Record<string, unknown>, detail),
-        },
-      ],
-    };
+    const formatted = formatScrapeResponse(result as Record<string, unknown>, detail, {
+      appliedDefaults,
+    });
+    return mcpTextResult(formatted, isScrapeFailure(result as Record<string, unknown>));
   }
 );
 
@@ -134,10 +164,10 @@ server.registerTool(
   "metalift_batch_scrape",
   {
     title: "Batch Scrape URLs",
-    description: `Scrape multiple URLs in parallel. Response includes credits_charged (per-page usage billing). Pass async=true for background job; wait=true (default) blocks with progress until done. ${COMPLIANCE_NOTICE}`,
+    description: `Scrape up to 100 URLs in parallel (billed per URL). Default response_detail=compact. Use async=true for background jobs; wait=true blocks with progress. For JS-heavy pages set strategy=auto in scrape_options. ${COMPLIANCE_NOTICE}`,
     inputSchema: {
-      urls: z.array(z.string().url()).min(1).max(100),
-      async: z.boolean().optional(),
+      urls: z.array(z.string().url()).min(1).max(100).describe("URLs to scrape in parallel"),
+      async: z.boolean().optional().describe("Run as background job (returns job id)"),
       wait: z
         .boolean()
         .optional()
@@ -147,18 +177,24 @@ server.registerTool(
           formats: z.array(z.enum(["markdown", "html", "text", "json"])).optional(),
           render: z.enum(["static", "dynamic", "auto"]).optional(),
           only_main_content: z.boolean().optional(),
+          timeout_ms: z.number().optional(),
+          wait_for: z.string().optional(),
+          proxy: z.enum(["auto", "direct", "residential", "datacenter"]).optional(),
+          strategy: z.string().optional(),
           response_detail: z.enum(["compact", "standard", "full"]).optional(),
         })
-        .optional(),
+        .optional()
+        .describe("Shared scrape options applied to every URL in the batch"),
     },
-    annotations: { readOnlyHint: true },
+    annotations: { readOnlyHint: true, openWorldHint: true },
   },
   async (args, extra) => {
-    const scrapeOptions = args.scrape_options ?? {};
+    const scrapeOptions = normalizeBatchScrapeOptions(args.urls, args.scrape_options ?? {});
     const detail = scrapeOptions.response_detail ?? "compact";
     const wait = args.wait ?? true;
     const { wait: _wait, ...batchArgs } = args;
     const urlCount = batchArgs.urls.length;
+    const syncTimeoutMs = batchHttpTimeoutMs(batchArgs.urls, scrapeOptions);
 
     const result = await runWithProgress(
       extra as ToolHandlerExtra | undefined,
@@ -166,39 +202,25 @@ server.registerTool(
       () =>
         client.batch(
           { ...batchArgs, scrape_options: { ...scrapeOptions, response_detail: detail } },
-          { timeoutMs: batchArgs.async ? 30_000 : Math.max(120_000, urlCount * 60_000) }
+          { timeoutMs: batchArgs.async ? 30_000 : syncTimeoutMs }
         )
     );
 
     if (batchArgs.async && wait && typeof result.id === "string") {
-      const job = await waitForJob(client, result.id, extra as ToolHandlerExtra | undefined);
+      const job = await waitForJob(client, result.id, extra as ToolHandlerExtra | undefined, {
+        timeoutMs: syncTimeoutMs,
+      });
       if (job.status === "failed") {
         throw new Error(typeof job.error === "string" ? job.error : "Batch job failed");
       }
-      return {
-        content: [
-          {
-            type: "text",
-            text: formatBatchScrapeResponse(job, detail),
-          },
-        ],
-      };
+      return mcpTextResult(formatBatchScrapeResponse(job, detail));
     }
 
     if (batchArgs.async && typeof result.id === "string") {
-      return {
-        content: [{ type: "text", text: formatJobCreated(result as Record<string, unknown>) }],
-      };
+      return mcpTextResult(formatJobCreated(result as Record<string, unknown>));
     }
 
-    return {
-      content: [
-        {
-          type: "text",
-          text: formatBatchScrapeResponse(result as Record<string, unknown>, detail),
-        },
-      ],
-    };
+    return mcpTextResult(formatBatchScrapeResponse(result as Record<string, unknown>, detail));
   }
 );
 
@@ -207,19 +229,19 @@ server.registerTool(
   {
     title: "Crawl Website",
     description:
-      "Crawl a website starting from a URL and return markdown for discovered pages. By default waits until complete with progress updates (wait=true). Set wait=false to return a job id immediately and poll metalift_job_status.",
+      "Crawl a site from a seed URL and return markdown for discovered pages (1+ credits per page). Default wait=true blocks with progress; wait=false returns job id for metalift_job_status.",
     inputSchema: {
-      url: z.string().url(),
-      limit: z.number().optional(),
-      max_depth: z.number().optional(),
-      include_paths: z.array(z.string()).optional(),
-      exclude_paths: z.array(z.string()).optional(),
+      url: z.string().url().describe("Seed URL to start crawling from"),
+      limit: z.number().optional().describe("Maximum pages to crawl"),
+      max_depth: z.number().optional().describe("Maximum link depth from seed URL"),
+      include_paths: z.array(z.string()).optional().describe("Only crawl paths matching these prefixes"),
+      exclude_paths: z.array(z.string()).optional().describe("Skip paths matching these prefixes"),
       wait: z
         .boolean()
         .optional()
         .describe("Wait for crawl to finish with progress updates (default true)."),
     },
-    annotations: { readOnlyHint: true },
+    annotations: { readOnlyHint: true, openWorldHint: true },
   },
   async (args, extra) => {
     const wait = args.wait ?? true;
@@ -232,9 +254,7 @@ server.registerTool(
     );
 
     if (!wait || typeof result.id !== "string") {
-      return {
-        content: [{ type: "text", text: formatJobCreated(result as Record<string, unknown>) }],
-      };
+      return mcpTextResult(formatJobCreated(result as Record<string, unknown>));
     }
 
     const job = await waitForJob(client, result.id, extra as ToolHandlerExtra | undefined);
@@ -242,14 +262,31 @@ server.registerTool(
       throw new Error(typeof job.error === "string" ? job.error : "Crawl job failed");
     }
 
-    return {
-      content: [
-        {
-          type: "text",
-          text: formatBatchScrapeResponse(job, "compact"),
-        },
-      ],
-    };
+    return mcpTextResult(formatBatchScrapeResponse(job, "compact"));
+  }
+);
+
+server.registerTool(
+  "metalift_sitemap",
+  {
+    title: "Fetch Sitemap",
+    description:
+      "Fetch XML sitemap URLs for a site. Discovers sitemap locations from robots.txt (Sitemap: directives) or /sitemap.xml, follows sitemap indexes, and returns page URLs with optional lastmod/changefreq/priority. Costs 1 credit. Prefer this over metalift_map when you need the site's published URL list.",
+    inputSchema: {
+      url: z.string().url().describe("Site homepage or direct sitemap.xml URL"),
+      limit: z.number().min(1).max(10000).optional(),
+      search: z.string().optional().describe("Optional substring filter; matching URLs sort first"),
+      same_origin: z.boolean().optional().describe("Only return URLs on the same origin (default true)"),
+    },
+    annotations: { readOnlyHint: true, openWorldHint: true },
+  },
+  async (args, extra) => {
+    const result = await runWithProgress(
+      extra as ToolHandlerExtra | undefined,
+      `Fetching sitemap for ${args.url}`,
+      () => client.sitemap(args, { timeoutMs: 120_000 })
+    );
+    return mcpTextResult(formatSitemapResponse(result as Record<string, unknown>));
   }
 );
 
@@ -257,13 +294,14 @@ server.registerTool(
   "metalift_map",
   {
     title: "Map Website URLs",
-    description: "Discover URLs on a website without scraping full content.",
+    description:
+      "Discover same-origin links by parsing HTML anchors on one page (1 credit). Fallback when metalift_sitemap is unavailable. Does not fetch full page content.",
     inputSchema: {
-      url: z.string().url(),
-      limit: z.number().optional(),
-      search: z.string().optional(),
+      url: z.string().url().describe("Page URL to extract links from"),
+      limit: z.number().optional().describe("Maximum URLs to return"),
+      search: z.string().optional().describe("Optional substring filter for URLs"),
     },
-    annotations: { readOnlyHint: true },
+    annotations: { readOnlyHint: true, openWorldHint: true },
   },
   async (args, extra) => {
     const result = await runWithProgress(
@@ -271,9 +309,7 @@ server.registerTool(
       `Mapping URLs on ${args.url}`,
       () => client.map(args, { timeoutMs: 120_000 })
     );
-    return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-    };
+    return mcpTextResult(formatMapResponse(result as Record<string, unknown>));
   }
 );
 
@@ -283,11 +319,11 @@ server.registerTool(
     title: "Web Search",
     description: `Search the web and return up to ${WEB_SEARCH_RESULT_LIMIT} SERP results (title, url, snippet, engine, score). Costs 2 credits per search. Returns search snippets only — not page content. Answer simple questions from snippets; do not auto-scrape. Call metalift_scrape separately only when full page content is required.`,
     inputSchema: {
-      query: z.string().min(1).max(512),
-      categories: z.array(z.string()).optional(),
-      language: z.string().max(16).optional(),
+      query: z.string().min(1).max(512).describe("Search query"),
+      categories: z.array(z.string()).optional().describe("Optional search categories"),
+      language: z.string().max(16).optional().describe("Result language (default en)"),
     },
-    annotations: { readOnlyHint: true },
+    annotations: { readOnlyHint: true, openWorldHint: true },
   },
   async (args, extra) => {
     const result = await runWithProgress(
@@ -295,9 +331,7 @@ server.registerTool(
       `Searching: ${args.query}`,
       () => client.search(buildWebSearchRequest(args))
     );
-    return {
-      content: [{ type: "text", text: formatWebSearchResponse(result) }],
-    };
+    return mcpTextResult(formatWebSearchResponse(result));
   }
 );
 
@@ -307,7 +341,7 @@ server.registerTool(
     title: "Get Job Status",
     description: "Poll async crawl or batch job status and results. Returns human-readable progress (pages completed, credits charged).",
     inputSchema: {
-      job_id: z.string(),
+      job_id: z.string().describe("Job id from metalift_crawl or metalift_batch_scrape"),
     },
     annotations: { readOnlyHint: true },
   },
@@ -317,9 +351,7 @@ server.registerTool(
       `Fetching job ${job_id.slice(0, 8)}…`,
       () => client.jobStatus(job_id)
     );
-    return {
-      content: [{ type: "text", text: formatJobStatus(result as Record<string, unknown>) }],
-    };
+    return mcpTextResult(formatJobStatus(result as Record<string, unknown>));
   }
 );
 
@@ -327,15 +359,13 @@ server.registerTool(
   "metalift_list_strategies",
   {
     title: "List Scrape Strategies",
-    description: "List available scrape strategies with protection levels and credit estimates.",
+    description: "List scrape strategies with protection levels and credit estimates. Use before scraping unknown protected sites.",
     inputSchema: {},
     annotations: { readOnlyHint: true },
   },
   async () => {
     const result = await client.listStrategies();
-    return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-    };
+    return mcpTextResult(formatStrategiesResponse(result as unknown as Record<string, unknown>));
   }
 );
 
@@ -364,7 +394,7 @@ server.registerTool(
         .describe("User-Agent from the same browser session that issued the cookies"),
       ttl_hours: z.number().min(1).max(168).optional(),
     },
-    annotations: { readOnlyHint: false },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   },
   async (args, extra) => {
     const result = await runWithProgress(
@@ -372,9 +402,8 @@ server.registerTool(
       `Seeding session for ${args.domain}`,
       () => client.seedSession(args)
     );
-    return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-    };
+    const formatted = formatSeedSessionResponse(result as unknown as Record<string, unknown>);
+    return mcpTextResult(formatted, result.success === false);
   }
 );
 
@@ -382,14 +411,19 @@ server.registerTool(
   "metalift_warm_session",
   {
     title: "Warm Domain Session",
-    description: "Visit a seed URL in a browser and store cookies for later scrapes (retail/WAF sites).",
+    description:
+      "Automated browser warmup to collect cookies for later scrapes (15 credits). Use when manual metalift_seed_session is not possible; often fails on strict WAFs.",
     inputSchema: {
-      url: z.string().url(),
+      url: z.string().url().describe("Seed URL to visit in browser"),
       strategy: z.string().optional().describe("e.g. retail, cloudflare, authenticated"),
-      domain: z.string().optional(),
-      timeout_ms: z.number().optional(),
+      proxy: z
+        .enum(["auto", "direct", "residential", "datacenter"])
+        .optional()
+        .describe("Default auto. Use residential for WAF-heavy sites."),
+      domain: z.string().optional().describe("Override domain for stored session"),
+      timeout_ms: z.number().optional().describe("Browser warmup timeout in milliseconds"),
     },
-    annotations: { readOnlyHint: false },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   },
   async (args, extra) => {
     const result = await runWithProgress(
@@ -397,9 +431,8 @@ server.registerTool(
       `Warming session for ${args.url}`,
       () => client.warmSession(args, { timeoutMs: 120_000 })
     );
-    return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-    };
+    const formatted = formatWarmSessionResponse(result as Record<string, unknown>);
+    return mcpTextResult(formatted, result.success === false);
   }
 );
 
@@ -407,15 +440,13 @@ server.registerTool(
   "metalift_list_sessions",
   {
     title: "List Domain Sessions",
-    description: "List seeded cookie sessions for the organization.",
+    description: "List org-scoped browser sessions stored via metalift_seed_session.",
     inputSchema: {},
     annotations: { readOnlyHint: true },
   },
   async () => {
     const result = await client.listSessions();
-    return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-    };
+    return mcpTextResult(formatSessionsListResponse(result as unknown as Record<string, unknown>));
   }
 );
 
@@ -443,6 +474,7 @@ server.registerResource(
                 "metalift_batch_scrape",
                 "metalift_crawl",
                 "metalift_map",
+                "metalift_sitemap",
                 "metalift_web_search",
                 "metalift_job_status",
                 "metalift_list_strategies",
@@ -455,6 +487,17 @@ server.registerResource(
                 result_limit: WEB_SEARCH_RESULT_LIMIT,
                 decoupled_from_scrape: true,
               },
+              credits: {
+                search: 2,
+                sitemap: 1,
+                map: 1,
+                scrape_static: 1,
+                scrape_js: 5,
+                scrape_premium: 10,
+                warm_session: 15,
+              },
+              decision_tree: CONFIG_DECISION_TREE,
+              agent_guide_uri: "metalift://agent-guide",
             },
             null,
             2
@@ -463,6 +506,25 @@ server.registerResource(
       ],
     };
   }
+);
+
+server.registerResource(
+  "agent-guide",
+  "metalift://agent-guide",
+  {
+    title: "Metalift Agent Guide",
+    description: "Extended workflow guidance for session handling, WAF sites, and tool selection",
+    mimeType: "text/markdown",
+  },
+  async () => ({
+    contents: [
+      {
+        uri: "metalift://agent-guide",
+        mimeType: "text/markdown",
+        text: AGENT_GUIDE_EXTENDED,
+      },
+    ],
+  })
 );
 
 server.registerResource(

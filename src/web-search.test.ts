@@ -27,7 +27,8 @@ test("formatWebSearchResponse renders readable snippets", () => {
       },
     ],
   });
+  assert.match(text, /Status: success/);
   assert.match(text, /Query: docker docs/);
   assert.match(text, /Docker Docs/);
-  assert.match(text, /Answer simple questions from these snippets/);
+  assert.match(text, /Next: Answer simple questions from snippets/);
 });

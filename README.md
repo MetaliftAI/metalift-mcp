@@ -69,10 +69,12 @@ Do not auto-scrape every search result. See [Web search](../../packages/platform
 | `metalift_scrape` | Scrape a single URL (default: fast direct static markdown, **`response_detail=compact`**; use `standard` / `full` for more) |
 | `metalift_batch_scrape` | Scrape multiple URLs (same `response_detail`; default `compact`) |
 | `metalift_crawl` | Crawl a website |
-| `metalift_map` | Discover site URLs |
+| `metalift_map` | Discover site URLs from page HTML links |
+| `metalift_sitemap` | Fetch XML sitemap URLs (robots.txt / sitemap.xml) |
 | `metalift_web_search` | Web search — top 10 SERP results (title, url, snippet). **2 credits** per search. Does not fetch page content; use `metalift_scrape` separately for URLs you need |
 | `metalift_job_status` | Poll async jobs |
 | `metalift_list_strategies` | List scrape strategies |
+| `metalift_seed_session` | Store browser session cookies for a domain |
 | `metalift_warm_session` | Warm WAF/retail cookies |
 | `metalift_list_sessions` | List stored domain sessions |
 

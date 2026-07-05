@@ -6,7 +6,8 @@ export function searchUnavailableMessage(apiUrl: string, statusCode?: number): s
     `Web search is not available on ${apiUrl}${status}. ` +
     "POST /v1/search was not found or search is temporarily unavailable. " +
     "See " +
-    `${SEARCH_UNAVAILABLE_DOCS} for availability and rollout status.`
+    `${SEARCH_UNAVAILABLE_DOCS} for availability and rollout status. ` +
+    "Fallback: scrape a known URL directly with metalift_scrape when the user provides a target page."
   );
 }
 

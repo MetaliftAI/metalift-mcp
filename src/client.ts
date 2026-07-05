@@ -36,23 +36,32 @@ export function withBilling<T extends Record<string, unknown>>(body: T, billing:
 }
 
 function formatApiError(body: unknown, status: number): string {
+  function withScrapeRecoveryHint(message: string): string {
+    if (!/Scrape blocked after strategy chain/i.test(message)) {
+      return message;
+    }
+    const chain = message.match(/strategy chain (\[[^\]]+\])/i)?.[1];
+    const tried = chain ? ` Tried: ${chain}.` : "";
+    return `${message}${tried} For JS-heavy pages, retry with strategy=spa,cloudflare and avoid wait_for=networkidle unless you have a real CSS selector.`;
+  }
+
   if (typeof body === "object" && body !== null) {
     const record = body as Record<string, unknown>;
     const detail = record.detail;
     if (typeof detail === "string" && detail) {
-      return detail;
+      return withScrapeRecoveryHint(detail);
     }
     if (typeof detail === "object" && detail !== null) {
       const detailRecord = detail as Record<string, unknown>;
       const message = detailRecord.message;
       const code = detailRecord.code;
       if (typeof message === "string" && message) {
-        return typeof code === "string" ? `${message} (${code})` : message;
+        return withScrapeRecoveryHint(typeof code === "string" ? `${message} (${code})` : message);
       }
     }
     const error = record.error;
     if (typeof error === "string" && error) {
-      return error;
+      return withScrapeRecoveryHint(error);
     }
   }
     if (typeof body === "string" && body.trim()) {
@@ -60,7 +69,7 @@ function formatApiError(body: unknown, status: number): string {
         if (trimmed.startsWith("<!DOCTYPE") || trimmed.startsWith("<html")) {
             return `Request failed: ${status} (received HTML instead of JSON — check METALIFT_API_URL points to the scrape API, e.g. http://localhost:8080)`;
         }
-    return trimmed.slice(0, 500);
+    return withScrapeRecoveryHint(trimmed.slice(0, 500));
   }
   return `Request failed: ${status}`;
 }
@@ -178,6 +187,14 @@ export class MetaliftClient {
   map(params: Record<string, unknown>, options?: { timeoutMs?: number }) {
     return this.request(
       "/v1/map",
+      { method: "POST", body: JSON.stringify(params) },
+      options
+    );
+  }
+
+  sitemap(params: Record<string, unknown>, options?: { timeoutMs?: number }) {
+    return this.request(
+      "/v1/sitemap",
       { method: "POST", body: JSON.stringify(params) },
       options
     );
