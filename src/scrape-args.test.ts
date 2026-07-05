@@ -82,6 +82,13 @@ test("normalizeScrapeArgs preserves cookie_header", () => {
   assert.equal(args.cookie_header, "sid=abc");
 });
 
+test("normalizeScrapeArgs routes cookies through browser session defaults", () => {
+  const args = normalizeScrapeArgs({ url: BASE_URL, cookie_header: "sid=abc" });
+  assert.equal(args.strategy, "cloudflare");
+  assert.equal(args.proxy, "residential");
+  assert.equal(args.render, "dynamic");
+});
+
 test("normalizeScrapeArgs auto-selects download for full-page HTML", () => {
   const args = normalizeScrapeArgs({
     url: BASE_URL,

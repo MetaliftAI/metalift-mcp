@@ -211,6 +211,13 @@ export class MetaliftClient {
     );
   }
 
+  seedSession(params: Record<string, unknown>) {
+    return this.request<{ success: boolean; domain: string; cookie_count: number }>(
+      "/v1/sessions",
+      { method: "PUT", body: JSON.stringify(params) }
+    );
+  }
+
   health() {
     return this.request<{ status: string; version: string; browser_ready?: boolean }>("/health");
   }

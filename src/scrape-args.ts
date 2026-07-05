@@ -15,6 +15,7 @@ export interface ScrapeArgs {
   strategy?: string;
   cookies?: Record<string, string>;
   cookie_header?: string;
+  headers?: Record<string, string>;
   response_detail?: ScrapeResponseDetail;
 }
 
@@ -148,10 +149,20 @@ export function normalizeScrapeArgs(args: ScrapeArgs): ScrapeArgs {
     args.wait_for !== undefined ||
     args.cookies !== undefined ||
     args.cookie_header !== undefined ||
+    args.headers !== undefined ||
     !isMarkdownOnlyFormats(args.formats);
 
   if (hasAdvancedOpts) {
-    return { ...args };
+    return {
+      ...args,
+      ...(args.cookies !== undefined || args.cookie_header !== undefined
+        ? {
+            proxy: args.proxy ?? "residential",
+            strategy: args.strategy ?? "cloudflare",
+            render: args.render ?? "dynamic",
+          }
+        : {}),
+    };
   }
 
   return {

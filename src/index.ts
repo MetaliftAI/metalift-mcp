@@ -36,6 +36,18 @@ Scraping (metalift_scrape, metalift_batch_scrape):
 
 Recommended agent workflow: metalift_web_search → answer from snippets when possible → metalift_scrape (compact) only when snippets are insufficient.
 
+Session cookies (WAF / login-gated pages):
+- Fingerprint mismatch exposes the scraper, not cookies themselves. Never replay cookies via static HTTP — that breaks TLS/JA3, Sec-CH-UA, and navigation context.
+- Correct pattern: browser session → Playwright (real Chromium TLS + headers) → sticky proxy → target. Metalift does this automatically when session credentials are present.
+- Preferred workflow:
+  1. User opens the site in their browser and passes cookies (or full Playwright storage_state JSON).
+  2. Call metalift_seed_session to store storage_state + user_agent for the domain (org-scoped, reused on later scrapes).
+  3. Call metalift_scrape without cookies — seeded session auto-applies via unified browser session.
+- One-shot: pass cookie_header or cookies on metalift_scrape — routes to Playwright + residential proxy (not static curl). Pair with headers.User-Agent from the same browser when provided.
+- Do not invent cookie values. Only use what the user explicitly provides.
+- metalift_warm_session (automated browser warmup, 15 credits) when manual seeding is not possible; often fails on strict WAFs.
+- metalift_list_sessions shows stored domains.
+
 For simple factual questions (versions, definitions, current events), prefer answering directly from search snippets. Do not scrape unless snippets are insufficient. Never paste raw scrape JSON to the user — summarize the answer in plain language.`;
 
 const client = new MetaliftClient();
@@ -54,7 +66,7 @@ server.registerTool(
   "metalift_scrape",
   {
     title: "Scrape URL",
-    description: `Scrape a single URL into markdown, HTML, or text for LLM context. Separate from web search — use after metalift_web_search when full page content is needed. Default response_detail=compact (truncated markdown, no links). Use standard for full page text or full for complete JSON + all links. Default scrape path: fast direct static article extraction (strategy=article, render=static, proxy=direct, 10s timeout). Known e-commerce hosts (Amazon, Walmart, Target, eBay, Etsy, Wayfair, Nike, Best Buy, etc.) auto-route to the retail strategy (dynamic render + residential proxy, falls back to cloudflare) — just pass the URL, no need to set strategy for these. For full page HTML on static sites use strategy=download with formats=["html"] (1 credit, all tiers). strategy=raw and full-page HTML without download require Enterprise tier. For WAF, SPA, retail, or JS-heavy pages pass strategy=auto or a specific strategy (spa, cloudflare, retail). Response includes credits_charged based on actual usage (static=1, JS=5, premium=10+). ${COMPLIANCE_NOTICE}`,
+    description: `Scrape a single URL into markdown, HTML, or text for LLM context. Separate from web search — use after metalift_web_search when full page content is needed. Default response_detail=compact (truncated markdown, no links). Use standard for full page text or full for complete JSON + all links. Default scrape path: fast direct static article extraction (strategy=article, render=static, proxy=direct, 10s timeout). Known e-commerce hosts (Amazon, Walmart, Target, eBay, Etsy, Wayfair, Nike, Best Buy, etc.) auto-route to the retail strategy (dynamic render + residential proxy, falls back to cloudflare) — just pass the URL, no need to set strategy for these. For full page HTML on static sites use strategy=download with formats=["html"] (1 credit, all tiers). strategy=raw and full-page HTML without download require Enterprise tier. For WAF, SPA, retail, or JS-heavy pages pass strategy=auto or a specific strategy (spa, cloudflare, retail). When the user provides browser session cookies (after a blocked scrape), pass cookie_header and matching User-Agent in headers. Response includes credits_charged based on actual usage (static=1, JS=5, premium=10+). ${COMPLIANCE_NOTICE}`,
     inputSchema: {
       url: z.string().url(),
       response_detail: z
@@ -76,12 +88,25 @@ server.registerTool(
         .describe(
           "Scrape strategy: auto, article, spa, cloudflare, authenticated, listing, retail, jsonld, download, raw, or comma-separated chain. Use download for full static HTML. See /v1/strategies for protection levels and credit estimates."
         ),
-      cookies: z.record(z.string()).optional(),
+      cookies: z
+        .record(z.string())
+        .optional()
+        .describe(
+          "Session cookies (name→value). Routes through Playwright browser session + proxy — not static HTTP. Prefer metalift_seed_session for reuse."
+        ),
       cookie_header: z
         .string()
         .max(16384)
         .optional()
-        .describe("Raw Cookie header from browser DevTools (for WAF-protected sites)"),
+        .describe(
+          "Raw Cookie header from DevTools. Routes through Playwright + sticky proxy to preserve browser TLS fingerprint. Prefer metalift_seed_session with storage_state for repeat scrapes."
+        ),
+      headers: z
+        .record(z.string())
+        .optional()
+        .describe(
+          'Extra request headers. Pass User-Agent from the user\'s browser when using cookie_header so the session fingerprint matches.'
+        ),
     },
     annotations: { readOnlyHint: true },
   },
@@ -315,6 +340,45 @@ server.registerTool(
 );
 
 server.registerTool(
+  "metalift_seed_session",
+  {
+    title: "Seed Domain Session",
+    description:
+      "Store browser session credentials for a domain (org-scoped). Prefer full Playwright storage_state JSON from the user's browser — preserves cookies + localStorage for fingerprint-coherent replay via unified browser session on later scrapes. Fallback: cookie_header + user_agent from DevTools.",
+    inputSchema: {
+      domain: z
+        .string()
+        .min(1)
+        .max(253)
+        .describe("Site hostname, e.g. actionpowertest.com or www.walmart.com"),
+      storage_state: z
+        .record(z.unknown())
+        .optional()
+        .describe("Playwright context.storageState() JSON — preferred over cookie_header alone"),
+      cookie_header: z.string().max(16384).optional(),
+      cookies: z.record(z.string()).optional(),
+      user_agent: z
+        .string()
+        .max(512)
+        .optional()
+        .describe("User-Agent from the same browser session that issued the cookies"),
+      ttl_hours: z.number().min(1).max(168).optional(),
+    },
+    annotations: { readOnlyHint: false },
+  },
+  async (args, extra) => {
+    const result = await runWithProgress(
+      extra as ToolHandlerExtra | undefined,
+      `Seeding session for ${args.domain}`,
+      () => client.seedSession(args)
+    );
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+    };
+  }
+);
+
+server.registerTool(
   "metalift_warm_session",
   {
     title: "Warm Domain Session",
@@ -382,6 +446,7 @@ server.registerResource(
                 "metalift_web_search",
                 "metalift_job_status",
                 "metalift_list_strategies",
+                "metalift_seed_session",
                 "metalift_warm_session",
                 "metalift_list_sessions",
               ],
