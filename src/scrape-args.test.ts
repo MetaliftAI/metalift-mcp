@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { FAST_SCRAPE_TIMEOUT_MS, normalizeScrapeArgs } from "./scrape-args.js";
+import {
+  FAST_SCRAPE_TIMEOUT_MS,
+  isEcommerceUrl,
+  normalizeScrapeArgs,
+} from "./scrape-args.js";
 
 const BASE_URL = "https://example.com/docs";
+const AMAZON_URL = "https://www.amazon.com";
 
 test("normalizeScrapeArgs applies fast defaults for plain markdown scrape", () => {
   assert.deepEqual(normalizeScrapeArgs({ url: BASE_URL }), {
@@ -115,5 +120,41 @@ test("normalizeScrapeArgs preserves multi-format requests", () => {
 test("normalizeScrapeArgs treats explicit markdown-only formats as fast path", () => {
   const args = normalizeScrapeArgs({ url: BASE_URL, formats: ["markdown"] });
   assert.equal(args.strategy, "article");
+  assert.equal(args.render, "static");
+});
+
+test("isEcommerceUrl detects known storefronts and ignores others", () => {
+  assert.equal(isEcommerceUrl("https://www.amazon.com/"), true);
+  assert.equal(isEcommerceUrl("https://smile.amazon.co.uk/gp/x"), true);
+  assert.equal(isEcommerceUrl("https://www.ebay.com/itm/123"), true);
+  assert.equal(isEcommerceUrl("https://www.etsy.com/listing/1"), true);
+  assert.equal(isEcommerceUrl("https://example.com/docs"), false);
+  assert.equal(isEcommerceUrl("not a url"), false);
+  // Suffix must be a real domain boundary, not a substring.
+  assert.equal(isEcommerceUrl("https://notamazon.com.evil.test/"), false);
+});
+
+test("normalizeScrapeArgs routes ecommerce homepages through retail auto path", () => {
+  const args = normalizeScrapeArgs({ url: AMAZON_URL });
+  assert.equal(args.strategy, "auto");
+  assert.equal(args.render, "auto");
+  assert.equal(args.proxy, "residential");
+  assert.equal(args.response_detail, "standard");
+  assert.deepEqual(args.formats, ["markdown"]);
+});
+
+test("normalizeScrapeArgs respects explicit strategy on ecommerce url", () => {
+  const args = normalizeScrapeArgs({ url: AMAZON_URL, strategy: "download" });
+  assert.equal(args.strategy, "download");
+});
+
+test("normalizeScrapeArgs respects explicit proxy/render on ecommerce url", () => {
+  const args = normalizeScrapeArgs({
+    url: AMAZON_URL,
+    proxy: "datacenter",
+    render: "static",
+  });
+  assert.equal(args.strategy, "auto");
+  assert.equal(args.proxy, "datacenter");
   assert.equal(args.render, "static");
 });

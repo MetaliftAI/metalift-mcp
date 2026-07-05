@@ -55,14 +55,43 @@ function formatApiError(body: unknown, status: number): string {
       return error;
     }
   }
-  if (typeof body === "string" && body.trim()) {
-    const trimmed = body.trim();
-    if (trimmed.startsWith("<!DOCTYPE") || trimmed.startsWith("<html")) {
-      return `Request failed: ${status} (received HTML instead of JSON — check METALIFT_API_URL is set to https://api.metalift.ai)`;
-    }
+    if (typeof body === "string" && body.trim()) {
+        const trimmed = body.trim();
+        if (trimmed.startsWith("<!DOCTYPE") || trimmed.startsWith("<html")) {
+            return `Request failed: ${status} (received HTML instead of JSON — check METALIFT_API_URL points to the scrape API, e.g. http://localhost:8080)`;
+        }
     return trimmed.slice(0, 500);
   }
   return `Request failed: ${status}`;
+}
+
+export function formatFetchError(error: unknown, apiUrl: string): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const cause =
+    error instanceof Error && error.cause instanceof Error
+      ? error.cause.message
+      : error instanceof Error && typeof error.cause === "string"
+        ? error.cause
+        : null;
+
+  const hints: string[] = [
+    `Could not reach Metalift API at ${apiUrl}.`,
+    "Check METALIFT_API_URL and METALIFT_API_KEY in your MCP config env block.",
+    "Verify outbound HTTPS to the API from PowerShell: curl https://api.metalift.ai/health",
+  ];
+
+  if (/certificate|UNABLE_TO_VERIFY|self signed|cert/i.test(`${message} ${cause ?? ""}`)) {
+    hints.push(
+      "TLS certificate verification failed — common on corporate Windows. Set NODE_EXTRA_CA_CERTS to your org root CA in the MCP env block.",
+    );
+  }
+
+  if (/ECONNREFUSED|ENOTFOUND|ETIMEDOUT|network|socket/i.test(`${message} ${cause ?? ""}`)) {
+    hints.push("Network or DNS blocked the request — check firewall, VPN, or proxy settings.");
+  }
+
+  const detail = cause && cause !== message ? `${message} (${cause})` : message;
+  return `${detail}\n\n${hints.join(" ")}`;
 }
 
 export class MetaliftClient {
@@ -86,11 +115,32 @@ export class MetaliftClient {
     return headers;
   }
 
-  async request<T extends Record<string, unknown>>(path: string, init?: RequestInit): Promise<T & BillingMeta> {
-    const response = await fetch(`${this.apiUrl}${path}`, {
-      ...init,
-      headers: { ...this.headers(), ...(init?.headers as Record<string, string> | undefined) },
-    });
+  async request<T extends Record<string, unknown>>(
+    path: string,
+    init?: RequestInit,
+    options?: { timeoutMs?: number }
+  ): Promise<T & BillingMeta> {
+    let response: Response;
+    const timeoutMs = options?.timeoutMs;
+    const signal =
+      timeoutMs !== undefined
+        ? AbortSignal.timeout(timeoutMs)
+        : init?.signal ?? undefined;
+
+    try {
+      response = await fetch(`${this.apiUrl}${path}`, {
+        ...init,
+        signal,
+        headers: { ...this.headers(), ...(init?.headers as Record<string, string> | undefined) },
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === "TimeoutError") {
+        throw new Error(
+          `Request to ${path} timed out after ${Math.round((timeoutMs ?? 0) / 1000)}s. Try async mode or increase timeout_ms.`,
+        );
+      }
+      throw new Error(formatFetchError(error, this.apiUrl));
+    }
     const rawBody = await response.text();
     let body: unknown;
     try {
@@ -105,20 +155,32 @@ export class MetaliftClient {
     return withBilling(body as T, billingFromResponse(response));
   }
 
-  scrape(params: ScrapeArgs | Record<string, unknown>) {
-    return this.request("/v1/scrape", { method: "POST", body: JSON.stringify(params) });
+  scrape(params: ScrapeArgs | Record<string, unknown>, options?: { timeoutMs?: number }) {
+    return this.request(
+      "/v1/scrape",
+      { method: "POST", body: JSON.stringify(params) },
+      options
+    );
   }
 
-  batch(params: Record<string, unknown>) {
-    return this.request("/v1/batch", { method: "POST", body: JSON.stringify(params) });
+  batch(params: Record<string, unknown>, options?: { timeoutMs?: number }) {
+    return this.request(
+      "/v1/batch",
+      { method: "POST", body: JSON.stringify(params) },
+      options
+    );
   }
 
   crawl(params: Record<string, unknown>) {
     return this.request("/v1/crawl", { method: "POST", body: JSON.stringify(params) });
   }
 
-  map(params: Record<string, unknown>) {
-    return this.request("/v1/map", { method: "POST", body: JSON.stringify(params) });
+  map(params: Record<string, unknown>, options?: { timeoutMs?: number }) {
+    return this.request(
+      "/v1/map",
+      { method: "POST", body: JSON.stringify(params) },
+      options
+    );
   }
 
   search(params: Record<string, unknown>) {
@@ -141,8 +203,12 @@ export class MetaliftClient {
     return this.request<{ success: boolean; sessions: unknown[] }>("/v1/sessions");
   }
 
-  warmSession(params: Record<string, unknown>) {
-    return this.request("/v1/sessions/fetch", { method: "POST", body: JSON.stringify(params) });
+  warmSession(params: Record<string, unknown>, options?: { timeoutMs?: number }) {
+    return this.request(
+      "/v1/sessions/fetch",
+      { method: "POST", body: JSON.stringify(params) },
+      options
+    );
   }
 
   health() {

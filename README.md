@@ -32,7 +32,9 @@ Published on npm as `@metalift/mcp`. Default config uses `npx`:
 }
 ```
 
-**Corporate Windows / SSL inspection:** if `npx` fails with `UNABLE_TO_VERIFY_LEAF_SIGNATURE`, install locally and use `node` — see [examples/cursor-mcp-local.json](../../examples/cursor-mcp-local.json) and [MCP setup troubleshooting](../../packages/platform-web/docs/mcp-setup.md#troubleshooting).
+**Claude Desktop:** paste the same JSON into `claude_desktop_config.json` (Settings → Developer → Edit Config). See [MCP setup — Claude Desktop](../../packages/platform-web/docs/mcp-setup.md#claude-desktop) and [examples/claude-mcp.json](../../examples/claude-mcp.json).
+
+**Corporate Windows / SSL inspection:** if `npx` fails with `UNABLE_TO_VERIFY_LEAF_SIGNATURE`, install locally and use `node` — see [examples/claude-mcp-local.json](../../examples/claude-mcp-local.json) / [cursor-mcp-local.json](../../examples/cursor-mcp-local.json) and [MCP setup troubleshooting](../../packages/platform-web/docs/mcp-setup.md#troubleshooting).
 
 ## Troubleshooting
 

@@ -44,6 +44,73 @@ function isMarkdownOnlyFormats(formats: ScrapeFormat[] | undefined): boolean {
 }
 
 /**
+ * Known e-commerce hosts that are protected by WAFs / bot detection and serve
+ * JS-rendered storefronts. The fast direct-static article path returns empty or
+ * bot-wall content for these, so we must route them through `auto` (which the
+ * API resolves to the `retail` strategy with a residential proxy).
+ */
+const ECOMMERCE_HOST_SUFFIXES: readonly string[] = [
+  "amazon.com",
+  "amazon.co.uk",
+  "amazon.ca",
+  "amazon.de",
+  "amazon.fr",
+  "amazon.co.jp",
+  "amazon.in",
+  "walmart.com",
+  "target.com",
+  "bestbuy.com",
+  "costco.com",
+  "samsclub.com",
+  "ebay.com",
+  "etsy.com",
+  "aliexpress.com",
+  "alibaba.com",
+  "temu.com",
+  "shein.com",
+  "wish.com",
+  "mercadolibre.com",
+  "rakuten.com",
+  "homedepot.com",
+  "lowes.com",
+  "wayfair.com",
+  "ikea.com",
+  "overstock.com",
+  "acehardware.com",
+  "macys.com",
+  "nordstrom.com",
+  "kohls.com",
+  "jcpenney.com",
+  "gap.com",
+  "oldnavy.com",
+  "nike.com",
+  "adidas.com",
+  "zappos.com",
+  "asos.com",
+  "zara.com",
+  "hm.com",
+  "uniqlo.com",
+  "lululemon.com",
+  "sephora.com",
+  "ulta.com",
+  "chewy.com",
+  "newegg.com",
+  "microcenter.com",
+];
+
+export function isEcommerceUrl(url: string): boolean {
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return ECOMMERCE_HOST_SUFFIXES.some(
+    (suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`),
+  );
+}
+
+/**
  * Apply fast defaults for plain URL-to-markdown scrapes.
  * Preserves full auto/browser/proxy behavior when the caller opts in explicitly.
  */
@@ -55,6 +122,21 @@ export function normalizeScrapeArgs(args: ScrapeArgs): ScrapeArgs {
       render: args.render ?? "static",
       proxy: args.proxy ?? "direct",
       timeout_ms: args.timeout_ms ?? FAST_SCRAPE_TIMEOUT_MS,
+    };
+  }
+
+  // Known e-commerce hosts must skip the fast direct-static article path (which
+  // returns bot-wall/empty content) and route through `auto` so the API resolves
+  // them to the retail strategy with a residential proxy. Respect any explicit
+  // strategy/render/proxy the caller already provided.
+  if (args.strategy === undefined && isEcommerceUrl(args.url)) {
+    return {
+      ...args,
+      formats: args.formats ?? ["markdown"],
+      strategy: "auto",
+      render: args.render ?? "auto",
+      proxy: args.proxy ?? "residential",
+      response_detail: args.response_detail ?? "standard",
     };
   }
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { billingFromResponse, withBilling } from "./client.js";
+import { billingFromResponse, formatFetchError, withBilling } from "./client.js";
 
 test("billingFromResponse parses credit headers", () => {
   const response = new Response("{}", {
@@ -28,4 +28,16 @@ test("withBilling merges billing fields into API payload", () => {
   assert.equal(merged.success, true);
   assert.equal(merged.credits_charged, 1);
   assert.equal(merged.credits_estimated, null);
+});
+
+test("formatFetchError includes API URL and TLS hint for certificate failures", () => {
+  const message = formatFetchError(
+    Object.assign(new Error("fetch failed"), {
+      cause: new Error("unable to verify the first certificate"),
+    }),
+    "https://api.metalift.ai",
+  );
+  assert.match(message, /Could not reach Metalift API at https:\/\/api\.metalift\.ai/);
+  assert.match(message, /METALIFT_API_KEY/);
+  assert.match(message, /NODE_EXTRA_CA_CERTS/);
 });

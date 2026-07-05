@@ -3,9 +3,17 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { MetaliftClient } from "./client.js";
+import { runStartupCheck } from "./startup-check.js";
 import { formatBatchScrapeResponse, formatScrapeResponse } from "./scrape-format.js";
-import { normalizeScrapeArgs, type ScrapeArgs } from "./scrape-args.js";
+import { normalizeScrapeArgs, FAST_SCRAPE_TIMEOUT_MS, type ScrapeArgs } from "./scrape-args.js";
 import { buildWebSearchRequest, formatWebSearchResponse, WEB_SEARCH_RESULT_LIMIT } from "./web-search.js";
+import {
+  formatJobCreated,
+  formatJobStatus,
+  runWithProgress,
+  waitForJob,
+  type ToolHandlerExtra,
+} from "./progress.js";
 
 const COMPLIANCE_NOTICE =
   "You are solely responsible for complying with website terms, robots.txt, copyright, and data protection laws when using scraped content.";
@@ -35,7 +43,7 @@ const client = new MetaliftClient();
 const server = new McpServer(
   {
     name: "metalift",
-    version: "1.0.10",
+    version: "1.0.11",
   },
   {
     instructions: SERVER_INSTRUCTIONS,
@@ -46,7 +54,7 @@ server.registerTool(
   "metalift_scrape",
   {
     title: "Scrape URL",
-    description: `Scrape a single URL into markdown, HTML, or text for LLM context. Separate from web search — use after metalift_web_search when full page content is needed. Default response_detail=compact (truncated markdown, no links). Use standard for full page text or full for complete JSON + all links. Default scrape path: fast direct static article extraction (strategy=article, render=static, proxy=direct, 10s timeout). For full page HTML on static sites use strategy=download with formats=["html"] (1 credit, all tiers). strategy=raw and full-page HTML without download require Enterprise tier. For WAF, SPA, retail, or JS-heavy pages pass strategy=auto or a specific strategy (spa, cloudflare, retail). Response includes credits_charged based on actual usage (static=1, JS=5, premium=10+). ${COMPLIANCE_NOTICE}`,
+    description: `Scrape a single URL into markdown, HTML, or text for LLM context. Separate from web search — use after metalift_web_search when full page content is needed. Default response_detail=compact (truncated markdown, no links). Use standard for full page text or full for complete JSON + all links. Default scrape path: fast direct static article extraction (strategy=article, render=static, proxy=direct, 10s timeout). Known e-commerce hosts (Amazon, Walmart, Target, eBay, Etsy, Wayfair, Nike, Best Buy, etc.) auto-route to the retail strategy (dynamic render + residential proxy, falls back to cloudflare) — just pass the URL, no need to set strategy for these. For full page HTML on static sites use strategy=download with formats=["html"] (1 credit, all tiers). strategy=raw and full-page HTML without download require Enterprise tier. For WAF, SPA, retail, or JS-heavy pages pass strategy=auto or a specific strategy (spa, cloudflare, retail). Response includes credits_charged based on actual usage (static=1, JS=5, premium=10+). ${COMPLIANCE_NOTICE}`,
     inputSchema: {
       url: z.string().url(),
       response_detail: z
@@ -77,10 +85,15 @@ server.registerTool(
     },
     annotations: { readOnlyHint: true },
   },
-  async (args) => {
+  async (args, extra) => {
     const normalized = normalizeScrapeArgs(args as ScrapeArgs);
     const detail = normalized.response_detail ?? "compact";
-    const result = await client.scrape({ ...normalized, response_detail: detail });
+    const timeoutMs = (normalized.timeout_ms ?? FAST_SCRAPE_TIMEOUT_MS) + 30_000;
+    const result = await runWithProgress(
+      extra as ToolHandlerExtra | undefined,
+      `Scraping ${normalized.url}`,
+      () => client.scrape({ ...normalized, response_detail: detail }, { timeoutMs })
+    );
     return {
       content: [
         {
@@ -96,10 +109,14 @@ server.registerTool(
   "metalift_batch_scrape",
   {
     title: "Batch Scrape URLs",
-    description: `Scrape multiple URLs in parallel. Response includes credits_charged (per-page usage billing). ${COMPLIANCE_NOTICE}`,
+    description: `Scrape multiple URLs in parallel. Response includes credits_charged (per-page usage billing). Pass async=true for background job; wait=true (default) blocks with progress until done. ${COMPLIANCE_NOTICE}`,
     inputSchema: {
       urls: z.array(z.string().url()).min(1).max(100),
       async: z.boolean().optional(),
+      wait: z
+        .boolean()
+        .optional()
+        .describe("When async=true, wait for completion with progress updates (default true)."),
       scrape_options: z
         .object({
           formats: z.array(z.enum(["markdown", "html", "text", "json"])).optional(),
@@ -111,13 +128,44 @@ server.registerTool(
     },
     annotations: { readOnlyHint: true },
   },
-  async (args) => {
+  async (args, extra) => {
     const scrapeOptions = args.scrape_options ?? {};
     const detail = scrapeOptions.response_detail ?? "compact";
-    const result = await client.batch({
-      ...args,
-      scrape_options: { ...scrapeOptions, response_detail: detail },
-    });
+    const wait = args.wait ?? true;
+    const { wait: _wait, ...batchArgs } = args;
+    const urlCount = batchArgs.urls.length;
+
+    const result = await runWithProgress(
+      extra as ToolHandlerExtra | undefined,
+      batchArgs.async ? `Starting batch scrape (${urlCount} URLs)` : `Batch scraping ${urlCount} URL(s)`,
+      () =>
+        client.batch(
+          { ...batchArgs, scrape_options: { ...scrapeOptions, response_detail: detail } },
+          { timeoutMs: batchArgs.async ? 30_000 : Math.max(120_000, urlCount * 60_000) }
+        )
+    );
+
+    if (batchArgs.async && wait && typeof result.id === "string") {
+      const job = await waitForJob(client, result.id, extra as ToolHandlerExtra | undefined);
+      if (job.status === "failed") {
+        throw new Error(typeof job.error === "string" ? job.error : "Batch job failed");
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text: formatBatchScrapeResponse(job, detail),
+          },
+        ],
+      };
+    }
+
+    if (batchArgs.async && typeof result.id === "string") {
+      return {
+        content: [{ type: "text", text: formatJobCreated(result as Record<string, unknown>) }],
+      };
+    }
+
     return {
       content: [
         {
@@ -134,20 +182,48 @@ server.registerTool(
   {
     title: "Crawl Website",
     description:
-      "Crawl a website starting from a URL and return markdown for discovered pages. Job creation shows credits_estimated; poll metalift_job_status for credits_charged as pages complete.",
+      "Crawl a website starting from a URL and return markdown for discovered pages. By default waits until complete with progress updates (wait=true). Set wait=false to return a job id immediately and poll metalift_job_status.",
     inputSchema: {
       url: z.string().url(),
       limit: z.number().optional(),
       max_depth: z.number().optional(),
       include_paths: z.array(z.string()).optional(),
       exclude_paths: z.array(z.string()).optional(),
+      wait: z
+        .boolean()
+        .optional()
+        .describe("Wait for crawl to finish with progress updates (default true)."),
     },
     annotations: { readOnlyHint: true },
   },
-  async (args) => {
-    const result = await client.crawl(args);
+  async (args, extra) => {
+    const wait = args.wait ?? true;
+    const { wait: _wait, ...crawlArgs } = args;
+
+    const result = await runWithProgress(
+      extra as ToolHandlerExtra | undefined,
+      `Starting crawl of ${crawlArgs.url}`,
+      () => client.crawl(crawlArgs)
+    );
+
+    if (!wait || typeof result.id !== "string") {
+      return {
+        content: [{ type: "text", text: formatJobCreated(result as Record<string, unknown>) }],
+      };
+    }
+
+    const job = await waitForJob(client, result.id, extra as ToolHandlerExtra | undefined);
+    if (job.status === "failed") {
+      throw new Error(typeof job.error === "string" ? job.error : "Crawl job failed");
+    }
+
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [
+        {
+          type: "text",
+          text: formatBatchScrapeResponse(job, "compact"),
+        },
+      ],
     };
   }
 );
@@ -164,8 +240,12 @@ server.registerTool(
     },
     annotations: { readOnlyHint: true },
   },
-  async (args) => {
-    const result = await client.map(args);
+  async (args, extra) => {
+    const result = await runWithProgress(
+      extra as ToolHandlerExtra | undefined,
+      `Mapping URLs on ${args.url}`,
+      () => client.map(args, { timeoutMs: 120_000 })
+    );
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
     };
@@ -184,8 +264,12 @@ server.registerTool(
     },
     annotations: { readOnlyHint: true },
   },
-  async (args) => {
-    const result = await client.search(buildWebSearchRequest(args));
+  async (args, extra) => {
+    const result = await runWithProgress(
+      extra as ToolHandlerExtra | undefined,
+      `Searching: ${args.query}`,
+      () => client.search(buildWebSearchRequest(args))
+    );
     return {
       content: [{ type: "text", text: formatWebSearchResponse(result) }],
     };
@@ -196,16 +280,20 @@ server.registerTool(
   "metalift_job_status",
   {
     title: "Get Job Status",
-    description: "Poll async crawl or batch job status and results.",
+    description: "Poll async crawl or batch job status and results. Returns human-readable progress (pages completed, credits charged).",
     inputSchema: {
       job_id: z.string(),
     },
     annotations: { readOnlyHint: true },
   },
-  async ({ job_id }) => {
-    const result = await client.jobStatus(job_id);
+  async ({ job_id }, extra) => {
+    const result = await runWithProgress(
+      extra as ToolHandlerExtra | undefined,
+      `Fetching job ${job_id.slice(0, 8)}…`,
+      () => client.jobStatus(job_id)
+    );
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [{ type: "text", text: formatJobStatus(result as Record<string, unknown>) }],
     };
   }
 );
@@ -239,8 +327,12 @@ server.registerTool(
     },
     annotations: { readOnlyHint: false },
   },
-  async (args) => {
-    const result = await client.warmSession(args);
+  async (args, extra) => {
+    const result = await runWithProgress(
+      extra as ToolHandlerExtra | undefined,
+      `Warming session for ${args.url}`,
+      () => client.warmSession(args, { timeoutMs: 120_000 })
+    );
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
     };
@@ -424,9 +516,39 @@ server.registerPrompt(
   })
 );
 
+/**
+ * Guard stdout: the stdio transport uses stdout for JSON-RPC framing. Any stray
+ * console.log/info/warn or library write to stdout corrupts the stream and makes
+ * Claude hang on `initialize` until it cancels (~60s). Redirect all console
+ * output to stderr so only the MCP transport ever writes to stdout.
+ */
+function redirectConsoleToStderr() {
+  const toStderr = (...args: unknown[]) => {
+    process.stderr.write(
+      args
+        .map((a) => (typeof a === "string" ? a : JSON.stringify(a)))
+        .join(" ") + "\n",
+    );
+  };
+  console.log = toStderr as typeof console.log;
+  console.info = toStderr as typeof console.info;
+  console.warn = toStderr as typeof console.warn;
+  console.debug = toStderr as typeof console.debug;
+}
+
 async function main() {
+  redirectConsoleToStderr();
+
+  // Connect the transport FIRST so the SDK can answer `initialize` immediately.
+  // No network/API work happens before this point.
   const transport = new StdioServerTransport();
   await server.connect(transport);
+
+  // Only after the handshake is live do we run the (fire-and-forget) API health
+  // check. It writes to stderr and never blocks the transport.
+  void runStartupCheck().catch((error) => {
+    console.error("[metalift-mcp] Startup check error:", error);
+  });
 }
 
 main().catch((error) => {
