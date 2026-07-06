@@ -33,6 +33,22 @@ export function scrapeRecoveryHints(context: RecoveryContext): string[] {
   const code = normalizeText(context.errorCode);
 
   if (
+    code.includes("enterprise_strategy") ||
+    error.includes("enterprise or partner tier")
+  ) {
+    hints.push(
+      "strategy=raw and full-page HTML (without strategy=download) require Enterprise or Partner tier."
+    );
+    hints.push(
+      'For full static HTML on any tier, use strategy=download with formats=["html"] and only_main_content=false.'
+    );
+    hints.push(
+      "For article markdown on any tier, omit strategy (defaults to article) or use response_detail=standard."
+    );
+    return hints;
+  }
+
+  if (
     code.includes("quota") ||
     code.includes("usage") ||
     code.includes("payment") ||
