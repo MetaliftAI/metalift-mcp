@@ -1,7 +1,7 @@
 {
   "name": "@metalift/mcp",
   "mcpName": "io.github.MetaLift-AI/metalift",
-  "version": "1.0.14",
+  "version": "1.0.15",
   "description": "Metalift MCP server for AI agents",
   "license": "SEE LICENSE IN LICENSE",
   "type": "module",
